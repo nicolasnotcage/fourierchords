@@ -277,7 +277,7 @@ impl Plugin for FourierChords {
 
         // Here you can do something with the detected notes, like updating a GUI
         // Update GUI logic goes here
-        nih_plug_egui::
+        // nih_plug_egui::
 
         ProcessStatus::Normal
     }
