@@ -1,13 +1,12 @@
 mod note_detection;
 
-pub use egui;
 use std::cmp::Ordering;
 use nih_plug::prelude::*;
-use nih_plug_egui;
+use nih_plug_egui::{create_egui_editor, egui, widgets, EguiState};
 use rustfft::{num_complex::Complex, FftPlanner, FftNum, Fft};
 use std::collections::HashMap;
 use std::f32::consts::PI;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use ordered_float::OrderedFloat;
 use crate::note_detection::get_note_data;
 extern crate rustfft;
@@ -68,37 +67,26 @@ struct FourierChords {
 
     // General prominence value
     prominence: f32,
+
+    // String that is used to output the notes
+    notes_string_for_display: String,
+
+    // Utility index counter for overwriting sample_vec values
+    counter: usize,
 }
 
 #[derive(Params)]
 struct FourierChordsParams {
-    // #[param(min = 512, max = 8192, step = 512)]
-    #[id = "window_size"]
-    fft_window_size: IntParam,
+    // Editor state
+    #[persist = "editor-state"]
+    editor_state: Arc<EguiState>,
 
-    // #[param(min = 0.0, max = 1.0, step = 0.05)]
-    #[id = "window_overlap"]
-    fft_window_overlap: FloatParam,
+    // Output for notes identified by the algorithm
+    #[persist = "notes-output"]
+    notes_output: Arc<Mutex<String>>,
 
-    // // #[param(min = 0.0, max = 1.0)]
-    // #[id = "magnitude_threshold"]
-    // magnitude_threshold: FloatParam,
-
-    // // #[param(min = 0.0, max = 1.0)]
-    // #[id = "prominence_threshold"]
-    // prominence_threshold: FloatParam,
-
-    // #[param(min = 20.0, max = 20000.0)]
-    #[id = "frequency_range_min"]
-    frequency_range_min: FloatParam,
-
-    // #[param(min = 20.0, max = 20000.0)]
-    #[id = "frequency_range_max"]
-    frequency_range_max: FloatParam,
-
-    // #[param(min = 0.0, max = 5.0)]
-    #[id = "smoothing_time"]
-    smoothing_time: FloatParam,
+    // Debug tracking
+    debug_messages: Arc<Mutex<String>>,
 }
 
 impl Default for FourierChords {
@@ -126,7 +114,7 @@ impl Default for FourierChords {
             complex_buffer: vec![Complex { re: 0.0, im: 0.0 }; 1024],
 
             // Initialize sample vector
-            sample_vec: Vec::new(),
+            sample_vec: vec![0.0; 1024],
 
             // Vector for FFT results
             fft_results: vec![Complex { re: 0.0, im: 0.0 }; 1024],
@@ -144,7 +132,7 @@ impl Default for FourierChords {
             frequency_resolution: 43.07,
 
             // Initialize nyquist limit
-            nyquist_limit: 22050,
+            nyquist_limit: 512,
 
             // TODO: Local maxima and prominent peaks may need more thorough implementation
             //  If you see crashes, try pre-allocating space because dynamic real-time growth may
@@ -164,6 +152,12 @@ impl Default for FourierChords {
 
             // General prominence value
             prominence: 0.0,
+
+            // Default note display value
+            notes_string_for_display: "".to_string(),
+
+            // Utility index counter for overwriting sample_vec values
+            counter: 0,
         }
     }
 }
@@ -171,21 +165,14 @@ impl Default for FourierChords {
 impl Default for FourierChordsParams {
     fn default() -> Self {
         Self {
-            // This gain is stored as linear gain. NIH-plug comes with useful conversion functions
-            // to treat these kinds of parameters as if we were dealing with decibels. Storing this
-            // as decibels is easier to work with, but requires a conversion for every sample.
-            fft_window_size: IntParam::new("Window Size", 1024, IntRange::Linear { min: 512, max: 8191 }),
-            fft_window_overlap: FloatParam::new("Window Overlap", 0.5, FloatRange::Linear { min: 0.0, max: 1.0 }),
-            // fft_window_type: EnumParam::new("Window Type", WindowType::Hanning),
+            // Default editor state           ]]
+            editor_state: EguiState::from_size(600, 360),
 
-            // TODO: Define default prominence and magnitude threshold values
-            // magnitude_threshold: FloatParam::new("Magnitude Threshold", 0.1, FloatRange::Linear { min: 0.0, max: 1.0 }),
-            // prominence_threshold: FloatParam::new("Prominence Threshold", 0.1, FloatRange::Linear { min: 0.0, max: 1.0 }),
-            frequency_range_min: FloatParam::new("Frequency Range Min", 20.0, FloatRange::Linear { min: 20.0, max: 20000.0 }),
-            frequency_range_max: FloatParam::new("Frequency Range Max", 20000.0, FloatRange::Linear { min: 20.0, max: 20000.0 }),
+            // Default note value
+            notes_output: Arc::new(Mutex::new("".to_string())),
 
-            // Not sure about how we've defined this, but it's not a big priority right now.
-            smoothing_time: FloatParam::new("Smoothing Time", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 }),
+            // Default debug message
+            debug_messages: Arc::new(Mutex::new("".to_string())),
         }
     }
 }
@@ -232,6 +219,39 @@ impl Plugin for FourierChords {
         self.params.clone()
     }
 
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        let editor_state = self.params.editor_state.clone();
+        let notes_output = self.params.notes_output.clone();
+        let debug_messages = self.params.debug_messages.clone();
+
+        create_egui_editor(
+            editor_state,
+            (),
+            |_, _| {},
+            move |egui_ctx, setter, _state| {
+                egui::CentralPanel::default().show(egui_ctx, |ui| {
+                    // Display a static label for "Identified Notes"
+                    ui.label("Identified Notes");
+
+                    // Here, display the dynamically loaded notes.
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        if let Ok(notes_output) = notes_output.lock() {
+                            ui.label(format!("{}", *notes_output));
+                        }
+                    });
+
+                    // Scrollable debugging area
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        if let Ok(debug_messages) = debug_messages.lock() {
+                            ui.label(&*debug_messages);
+                        }
+                    })
+                });
+            },
+        )
+    }
+
+
     fn initialize(
         &mut self,
         _audio_io_layout: &AudioIOLayout,
@@ -256,12 +276,23 @@ impl Plugin for FourierChords {
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+
         // Get samples from buffer iterator
+        self.counter = 0;
         for mut sample_frame in buffer.iter_samples() {
             if let Some(&mut left_sample) = sample_frame.get_mut(0) {
-                self.sample_vec.push(left_sample);
+                self.sample_vec[self.counter % 1024] = left_sample;
             }
+
+            self.counter = (self.counter + 1) % self.sample_vec.len();
         }
+
+        // // Get samples from buffer iterator
+        // for mut sample_frame in buffer.iter_samples() {
+        //     if let Some(&mut left_sample) = sample_frame.get_mut(0) {
+        //         self.sample_vec.push(left_sample);
+        //     }
+        // }
 
         // Apply the window function to the audio data (Hanning, etc.)
         apply_window_function(self);
@@ -272,12 +303,34 @@ impl Plugin for FourierChords {
         // Get the spectrum data
         get_spectrum_data(self);
 
+
         // Identify notes
         identify_notes(self);
 
-        // Here you can do something with the detected notes, like updating a GUI
-        // Update GUI logic goes here
-        // nih_plug_egui::
+
+        // Update GUI with newly detected notes
+        if self.params.editor_state.is_open() && !self.detected_notes.is_empty() {
+            // Build a string from the detected notes
+            let new_notes_string = self.detected_notes.join(", ");
+
+            // Update only if there are new notes to display
+            if !self.notes_string_for_display.contains(&new_notes_string) {
+                let updated_notes = if new_notes_string.is_empty() {
+                    "None".to_string()
+                } else {
+                    new_notes_string
+                };
+
+                // Update the shared notes_output variable
+                if let Ok(mut notes_output) = self.params.notes_output.lock() {
+                    *notes_output = updated_notes;
+                }
+
+                // Now that we've updated the GUI, clear the detected_notes
+                self.detected_notes.clear();
+            }
+        }
+
 
         ProcessStatus::Normal
     }
@@ -314,42 +367,42 @@ struct SpectrumData {
 }
 
 // Function Definitions
-fn perform_fft(fft_chords: &mut FourierChords) -> () {
+fn perform_fft(fourier_chords: &mut FourierChords) -> () {
     // Check that the input and complex_vec are the same length
-    assert_eq!(fft_chords.windowed_values.len(),
-               fft_chords.complex_buffer.len(),
+    assert_eq!(fourier_chords.windowed_values.len(),
+               fourier_chords.complex_buffer.len(),
                "Input and complex_vec must be of the same length");
 
     // Populate the complex_vec with values from windowed vec
-    for (complex, &input_val) in fft_chords.complex_buffer
+    for (complex, &input_val) in fourier_chords.complex_buffer
         .iter_mut()
-        .zip(fft_chords.windowed_values.iter()) {
+        .zip(fourier_chords.windowed_values.iter()) {
         *complex = Complex { re: input_val, im: 0.0 };
     }
 
     // Perform forward FFT on input data
-    fft_chords.fft_algorithm.process(&mut fft_chords.complex_buffer);
+    fourier_chords.fft_algorithm.process(&mut fourier_chords.complex_buffer);
 }
 
 
 // Utility function to apply the window function in place
 fn apply_window_function(fourier_chords: &mut FourierChords) {
     for (i, (&sample, windowed_value)) in fourier_chords.sample_vec.iter().zip(fourier_chords.windowed_values.iter_mut()).enumerate() {
-        let window_value = 0.5 - 0.5 * ((2.0 * PI * i as f32 / (1024f32 - 1.0)).cos());
+        let window_value = 0.5 - 0.5 * (2.0 * PI * i as f32 / (1024f32 - 1.0)).cos();
         *windowed_value = sample * window_value;
     }
 }
 
 // Transforms buffer of complex numbers from FFT forward transform and returns vector of
 // SpectrumData, which contains fields for frequencies and magnitudes
-fn get_spectrum_data(fft_chords: &mut FourierChords) -> () {
-    for (i, spectrum_data) in fft_chords.spectrum_data
+fn get_spectrum_data(fourier_chords: &mut FourierChords) -> () {
+    for (i, spectrum_data) in fourier_chords.spectrum_data
         .iter_mut()
         .enumerate()
-        .take(fft_chords.nyquist_limit) {
+        .take(fourier_chords.nyquist_limit) {
 
-        let frequency = i as f32 * fft_chords.frequency_resolution;
-        let magnitude = fft_chords.complex_buffer[i].norm();
+        let frequency = i as f32 * fourier_chords.frequency_resolution;
+        let magnitude = fourier_chords.complex_buffer[i].norm();
 
         spectrum_data.frequency = frequency;
         spectrum_data.magnitude = magnitude;
@@ -358,17 +411,17 @@ fn get_spectrum_data(fft_chords: &mut FourierChords) -> () {
 }
 
 // Function to identify notes in the spectrum
-fn identify_notes(fft_chords: &mut FourierChords) -> () {
+fn identify_notes(fourier_chords: &mut FourierChords) -> () {
     // Calculate local maxima of given spectrum data
-    get_local_maxima(fft_chords);
+    get_local_maxima(fourier_chords);
 
     // TODO: Finish peak picking algorithm process
-    get_prominent_peaks(fft_chords);
+    get_prominent_peaks(fourier_chords);
 
     // Initializes frequency to note hash map
     let freq_to_note = get_note_data();
 
-    for value in &fft_chords.prominent_peaks {
+    for value in &fourier_chords.prominent_peaks {
         let closest_frequency = freq_to_note
             .keys()
             .min_by(|&freq1, &freq2| {
@@ -381,27 +434,29 @@ fn identify_notes(fft_chords: &mut FourierChords) -> () {
 
         let note = freq_to_note.get(closest_frequency).unwrap(); // Get the note corresponding to the closest matching frequency
 
-        fft_chords.detected_notes.push(note.clone()); // Clone the note string and add it to matched_notes
+        if !fourier_chords.detected_notes.contains(&note.to_string()) {
+            fourier_chords.detected_notes.push(note.clone()); // Clone the note string and add it to matched_notes
+        }
     }
 }
 
 // TODO: Consider adding these as FFT Chord implementation functions; seems like that would be more
 //  straightforward based on how many functions we're defining that depend on traits
 // Calculate local maxima
-fn get_local_maxima(fft_chords: &mut FourierChords) -> () {
+fn get_local_maxima(fourier_chords: &mut FourierChords) -> () {
     // Calculate magnitude threshold and assign it. Play with this value to optimize execution time.
     // Currently, we're using a threshold of one third of the maximum magnitude.
-    fft_chords.magnitude_threshold = max_magnitude(&fft_chords.spectrum_data) / 3.0;
+    fourier_chords.magnitude_threshold = max_magnitude(&fourier_chords.spectrum_data) / 4.0;
 
     // Identifies local maxima and pushes them to maxima vector
-    for i in 1..fft_chords.spectrum_data.len() - 1 {
-        if fft_chords.spectrum_data[i].magnitude < fft_chords.magnitude_threshold {
+    for i in 1..fourier_chords.spectrum_data.len() - 1 {
+        if fourier_chords.spectrum_data[i].magnitude < fourier_chords.magnitude_threshold {
             continue;
         }
-        if fft_chords.spectrum_data[i].magnitude > fft_chords.spectrum_data[i - 1].magnitude
-            && fft_chords.spectrum_data[i].magnitude > fft_chords.spectrum_data[i + 1].magnitude
+        if fourier_chords.spectrum_data[i].magnitude > fourier_chords.spectrum_data[i - 1].magnitude
+            && fourier_chords.spectrum_data[i].magnitude > fourier_chords.spectrum_data[i + 1].magnitude
         {
-            fft_chords.local_maxima.push(fft_chords.spectrum_data[i].clone());
+            fourier_chords.local_maxima.push(fourier_chords.spectrum_data[i].clone());
         }
     }
 }
@@ -416,13 +471,13 @@ fn max_magnitude(spectrum: &Vec<SpectrumData>) -> f32 {
 }
 
 // TODO: Implement prominent peak picking algorithm
-fn get_prominent_peaks(fft_chords: &mut FourierChords) -> () {
-    fft_chords.prominence_threshold = max_magnitude(&fft_chords.local_maxima) / 4.0;
+fn get_prominent_peaks(fourier_chords: &mut FourierChords) -> () {
+    fourier_chords.prominence_threshold = max_magnitude(&fourier_chords.local_maxima) / 4.0;
 
-    for peak in &fft_chords.local_maxima {
-        fft_chords.prominence = calculate_prominence(&fft_chords.spectrum_data, peak.index);
-        if fft_chords.prominence >= fft_chords.prominence_threshold {
-            fft_chords.prominent_peaks.push(peak.clone());
+    for peak in &fourier_chords.local_maxima {
+        fourier_chords.prominence = calculate_prominence(&fourier_chords.spectrum_data, peak.index);
+        if fourier_chords.prominence >= fourier_chords.prominence_threshold {
+            fourier_chords.prominent_peaks.push(peak.clone());
         }
     }
 }
@@ -454,4 +509,11 @@ fn calculate_prominence(spectrum: &[SpectrumData], peak_index: usize) -> f32 {
 
     // Return prominence
     prominence
+}
+
+// Utility function to populate notes for display
+fn create_notes_string(fourier_chords: &mut FourierChords) {
+    for note in fourier_chords.detected_notes.iter() {
+        fourier_chords.notes_string_for_display.push_str(note);
+    }
 }
