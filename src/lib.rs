@@ -2,7 +2,7 @@ mod note_detection;
 
 use std::cmp::Ordering;
 use nih_plug::prelude::*;
-use nih_plug_egui::{create_egui_editor, egui, widgets, EguiState};
+use nih_plug_egui::{create_egui_editor, egui, EguiState};
 use rustfft::{num_complex::Complex, FftPlanner, FftNum, Fft};
 use std::collections::HashMap;
 use std::f32::consts::PI;
@@ -327,9 +327,12 @@ impl Plugin for FourierChords {
                 }
 
                 // Now that we've updated the GUI, clear the detected_notes
-                self.detected_notes.clear();
+                // self.detected_notes.clear();
             }
         }
+
+        self.local_maxima.clear();
+        self.prominent_peaks.clear();
 
 
         ProcessStatus::Normal
