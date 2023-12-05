@@ -29,9 +29,6 @@ struct FourierChords {
     // Starting sample vector
     sample_vec: Vec<f32>,
 
-    // Vector for FFT results
-    fft_results: Vec<Complex<f32>>,
-
     // Vector for windowed values
     windowed_values: Vec<f32>,
 
@@ -95,7 +92,7 @@ impl Default for FourierChords {
         let mut planner = FftPlanner::new();
 
         // Use planner to create FFT algorithm
-        let fft_algorithm = planner.plan_fft_forward(1024);
+        let fft_algorithm = planner.plan_fft_forward(264600);
 
         Self {
             params: Arc::new(FourierChordsParams::default()),
@@ -104,35 +101,33 @@ impl Default for FourierChords {
 
             // Initialize default buffer size
             // TODO: Make this adaptable to host's buffer size
-            buffer_size: 1024,
+            buffer_size: 264600,
 
             // Initialize note data hashmap
             note_data: get_note_data(),
 
             // Initialize complex buffer
             // TODO: Change this and the below vectors to adapt to buffer size
-            complex_buffer: vec![Complex { re: 0.0, im: 0.0 }; 1024],
+            complex_buffer: vec![Complex { re: 0.0, im: 0.0 }; 264600],
 
             // Initialize sample vector
-            sample_vec: vec![0.0; 1024],
-
-            // Vector for FFT results
-            fft_results: vec![Complex { re: 0.0, im: 0.0 }; 1024],
+            // sample_vec: vec![0.0; 264600],
+            sample_vec: Vec::new(),
 
             // Vector for windowed values
-            windowed_values: vec![0.0; 1024],
+            windowed_values: vec![0.0; 264600],
 
             // Initialize fft_algorithm to the one initialized in default function
             fft_algorithm,
 
             // Initialize Spectrum Data object with zeroed values
-            spectrum_data: vec![SpectrumData { frequency: 0.0, magnitude: 0.0, index: 0 }; 1024],
+            spectrum_data: vec![SpectrumData { frequency: 0.0, magnitude: 0.0, index: 0 }; 264600],
 
             // Initialize frequency resolution
-            frequency_resolution: 43.07,
+            frequency_resolution: 0.16666667,
 
             // Initialize nyquist limit
-            nyquist_limit: 512,
+            nyquist_limit: 132300,
 
             // TODO: Local maxima and prominent peaks may need more thorough implementation
             //  If you see crashes, try pre-allocating space because dynamic real-time growth may
@@ -277,35 +272,44 @@ impl Plugin for FourierChords {
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
 
-        // Get samples from buffer iterator
-        self.counter = 0;
-        for mut sample_frame in buffer.iter_samples() {
-            if let Some(&mut left_sample) = sample_frame.get_mut(0) {
-                self.sample_vec[self.counter % 1024] = left_sample;
-            }
-
-            self.counter = (self.counter + 1) % self.sample_vec.len();
-        }
-
-        // // Get samples from buffer iterator
+        // Copy samples from buffer to sample_vec
+        // self.counter = 0;
         // for mut sample_frame in buffer.iter_samples() {
         //     if let Some(&mut left_sample) = sample_frame.get_mut(0) {
-        //         self.sample_vec.push(left_sample);
+        //         self.sample_vec[self.counter % 1024] = left_sample;
         //     }
+        //
+        //     self.counter = (self.counter + 1) % self.sample_vec.len();
         // }
 
-        // Apply the window function to the audio data (Hanning, etc.)
-        apply_window_function(self);
+        // // Apply the window function to the audio data (Hanning, etc.)
+        // apply_window_function(self);
+        //
+        // // Perform the FFT
+        // perform_fft(self);
+        //
+        // // Get the spectrum data
+        // get_spectrum_data(self);
+        //
+        //
+        // // Identify notes
+        // identify_notes(self);
 
-        // Perform the FFT
-        perform_fft(self);
+        for mut sample_frame in buffer.iter_samples() {
+            if let Some(&mut left_sample) = sample_frame.get_mut(0) {
+                self.sample_vec.push(left_sample);
 
-        // Get the spectrum data
-        get_spectrum_data(self);
+                // Check if we've reached the desired sample count
+                if self.sample_vec.len() >= 264600 {
+                    // Perform analysis (e.g., FFT)
+                    perform_analysis(self);
 
-
-        // Identify notes
-        identify_notes(self);
+                    // Clear the sample_vec or handle overlap
+                    self.sample_vec.clear(); // or handle overlap as needed
+                    break; // Important to break to avoid overfilling the buffer
+                }
+            }
+        }
 
 
         // Update GUI with newly detected notes
@@ -334,6 +338,8 @@ impl Plugin for FourierChords {
         self.local_maxima.clear();
         self.prominent_peaks.clear();
 
+        // This breaks the VST
+        // self.spectrum_data.clear();
 
         ProcessStatus::Normal
     }
@@ -367,6 +373,22 @@ struct SpectrumData {
     frequency: f32,
     magnitude: f32,
     index: usize,
+}
+
+// Executes algorithm
+fn perform_analysis(fourier_chords: &mut FourierChords) {
+    // Apply the window function to the audio data (Hanning, etc.)
+    apply_window_function(fourier_chords);
+
+    // Perform the FFT
+    perform_fft(fourier_chords);
+
+    // Get the spectrum data
+    get_spectrum_data(fourier_chords);
+
+
+    // Identify notes
+    identify_notes(fourier_chords);
 }
 
 // Function Definitions
@@ -449,7 +471,7 @@ fn identify_notes(fourier_chords: &mut FourierChords) -> () {
 fn get_local_maxima(fourier_chords: &mut FourierChords) -> () {
     // Calculate magnitude threshold and assign it. Play with this value to optimize execution time.
     // Currently, we're using a threshold of one third of the maximum magnitude.
-    fourier_chords.magnitude_threshold = max_magnitude(&fourier_chords.spectrum_data) / 4.0;
+    fourier_chords.magnitude_threshold = max_magnitude(&fourier_chords.spectrum_data) / 3.0;
 
     // Identifies local maxima and pushes them to maxima vector
     for i in 1..fourier_chords.spectrum_data.len() - 1 {
@@ -470,7 +492,7 @@ fn max_magnitude(spectrum: &Vec<SpectrumData>) -> f32 {
     spectrum.iter()
         .map(|data| data.magnitude) // Extract the magnitude from each SpectrumData
         .max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal)) // Compare magnitudes
-        .unwrap_or(0.0) // Handle the case where spectrum_data is empty
+        .unwrap_or(10000.0) // Handle the case where spectrum_data is empty
 }
 
 // TODO: Implement prominent peak picking algorithm
@@ -519,4 +541,10 @@ fn create_notes_string(fourier_chords: &mut FourierChords) {
     for note in fourier_chords.detected_notes.iter() {
         fourier_chords.notes_string_for_display.push_str(note);
     }
+}
+
+// Function to convert float sample values to i16 values for FFT analysis
+fn convert_float_to_int16(float_sample: f32) -> i16 {
+    let clamped_sample = float_sample.max(-1.0).min(1.0);
+    (clamped_sample * 32767.0) as i16
 }
