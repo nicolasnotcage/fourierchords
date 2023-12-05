@@ -18,7 +18,7 @@ struct FourierChords {
     sample_rate: f32,
 
     // Buffer size
-    buffer_size: u32,
+    window_size: usize,
 
     // Note data for real-time note detection
     note_data: HashMap<OrderedFloat<f32>, String>,
@@ -95,41 +95,43 @@ impl Default for FourierChords {
         let mut planner = FftPlanner::new();
 
         // Use planner to create FFT algorithm
-        let fft_algorithm = planner.plan_fft_forward(264600);
+        // Update value here if changing window size. Testing showed 65,536 to be a good balance
+        // between performance and algorithm accuracy.
+        let fft_algorithm = planner.plan_fft_forward(65536);
 
         Self {
             params: Arc::new(FourierChordsParams::default()),
-            // Initialize sample rate to standard of 44.1khz
+
+            // Initialize sample rate to standard of 44.1khz. Will be updated in initialize function.
             sample_rate: 44100.0,
 
-            // Initialize default buffer size
-            // TODO: Make this adaptable to host's buffer size
-            buffer_size: 264600,
+            // Initialize de
+            window_size: 65536,
 
             // Initialize note data hashmap
+            // TODO: This should likely be handled by initialization function.
             note_data: get_note_data(),
 
             // Initialize complex buffer
-            // TODO: Change this and the below vectors to adapt to buffer size
-            complex_buffer: vec![Complex { re: 0.0, im: 0.0 }; 264600],
+            complex_buffer: Vec::new(),
 
             // Initialize sample vector
             // sample_vec: vec![0.0; 264600],
             sample_vec: Vec::new(),
 
             // Vector for windowed values
-            windowed_values: vec![0.0; 264600],
+            windowed_values: Vec::new(),
 
             // Initialize fft_algorithm to the one initialized in default function
             fft_algorithm,
 
             // Initialize Spectrum Data object with zeroed values
-            spectrum_data: vec![SpectrumData { frequency: 0.0, magnitude: 0.0, index: 0 }; 264600],
+            spectrum_data: Vec::new(),
 
-            // Initialize frequency resolution
+            // Initialize default frequency resolution. Will be calculated again when spectrum is created.
             frequency_resolution: 0.16666667,
 
-            // Initialize nyquist limit
+            // Initialize default nyquist limit. Will be calculated again when spectrum is created.
             nyquist_limit: 132300,
 
             // Detection vectors
@@ -253,7 +255,7 @@ impl Plugin for FourierChords {
                     });
 
                     // Flexible space to push the debug area to the bottom
-                    ui.add_space(ui.available_height() / 1.1);
+                    ui.add_space(ui.available_height() / 1.15);
 
                     // Scrollable debugging area, located beneath the notes display
                     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -276,9 +278,18 @@ impl Plugin for FourierChords {
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         // Resize buffers and perform other potentially expensive initialization operations here.
-        // The `reset()` function is always called right after this function. You can remove this
-        // function if you do not need it.
-        // self.sample_rate = _buffer_config.sample_rate as f32;
+        // The `reset()` function is always called right after this function.
+
+        // Set sample rate
+        self.sample_rate = _buffer_config.sample_rate;
+
+        // Set all FFT buffers to be equal to desired window size
+        self.complex_buffer.resize(self.window_size, Complex { re: 0.0, im: 0.0 });
+
+        self.windowed_values.resize(self.window_size, 0.0);
+
+        self.spectrum_data.resize(self.window_size, SpectrumData { frequency: 0.0, magnitude: 0.0, index: 0 });
+
         true
     }
 
@@ -297,7 +308,7 @@ impl Plugin for FourierChords {
         // Print buffer size to debug window
         if !self.buffer_displayed {
             {
-                let message = format!("Buffer size: {:?}", buffer.samples());
+                let message = format!("Sample Rate: {:?}\nBuffer Size: {:?}", self.sample_rate, buffer.samples());
                 let mut debug_messages = self.params.debug_messages.lock().unwrap();
                 debug_messages.push_str(&message);
             }
@@ -313,7 +324,7 @@ impl Plugin for FourierChords {
                 }
 
                 // Check if we've reached the desired sample count
-                if self.sample_vec.len() >= 264600 {
+                if self.sample_vec.len() >= self.window_size {
                     // Perform analysis (e.g., FFT)
                     perform_analysis(self);
 
@@ -426,7 +437,7 @@ fn perform_fft(fourier_chords: &mut FourierChords) -> () {
 // Utility function to apply the window function in place
 fn apply_window_function(fourier_chords: &mut FourierChords) {
     for (i, (&sample, windowed_value)) in fourier_chords.sample_vec.iter().zip(fourier_chords.windowed_values.iter_mut()).enumerate() {
-        let window_value = 0.5 - 0.5 * (2.0 * PI * i as f32 / (264600f32 - 1.0)).cos();
+        let window_value = 0.5 - 0.5 * (2.0 * PI * i as f32 / (fourier_chords.window_size as f32 - 1.0)).cos();
         *windowed_value = sample * window_value;
     }
 }
@@ -434,7 +445,7 @@ fn apply_window_function(fourier_chords: &mut FourierChords) {
 // Transforms buffer of complex numbers from FFT forward transform and returns vector of
 // SpectrumData, which contains fields for frequencies and magnitudes
 fn get_spectrum_data(fourier_chords: &mut FourierChords) -> () {
-    fourier_chords.nyquist_limit = fourier_chords.sample_vec.len() /2;
+    fourier_chords.nyquist_limit = fourier_chords.sample_vec.len() / 2;
     fourier_chords.frequency_resolution = fourier_chords.sample_rate / fourier_chords.sample_vec.len() as f32;
 
     for (i, spectrum_data) in fourier_chords.spectrum_data
