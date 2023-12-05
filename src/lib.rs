@@ -70,6 +70,9 @@ struct FourierChords {
 
     // Utility index counter for overwriting sample_vec values
     counter: usize,
+
+    // Boolean for debug printing buffer size
+    buffer_displayed: bool,
 }
 
 #[derive(Params)]
@@ -129,9 +132,7 @@ impl Default for FourierChords {
             // Initialize nyquist limit
             nyquist_limit: 132300,
 
-            // TODO: Local maxima and prominent peaks may need more thorough implementation
-            //  If you see crashes, try pre-allocating space because dynamic real-time growth may
-            //  cause unexpected crashes
+            // Detection vectors
             local_maxima: Vec::new(),
             prominent_peaks: Vec::new(),
             detected_notes: Vec::new(),
@@ -153,6 +154,9 @@ impl Default for FourierChords {
 
             // Utility index counter for overwriting sample_vec values
             counter: 0,
+
+            // Defaults to false
+            buffer_displayed: false,
         }
     }
 }
@@ -161,7 +165,7 @@ impl Default for FourierChordsParams {
     fn default() -> Self {
         Self {
             // Default editor state           ]]
-            editor_state: EguiState::from_size(600, 360),
+            editor_state: EguiState::from_size(400, 300),
 
             // Default note value
             notes_output: Arc::new(Mutex::new("".to_string())),
@@ -226,21 +230,39 @@ impl Plugin for FourierChords {
             move |egui_ctx, setter, _state| {
                 egui::CentralPanel::default().show(egui_ctx, |ui| {
                     // Display a static label for "Identified Notes"
-                    ui.label("Identified Notes");
+                    ui.vertical_centered(|ui| {
+                        // Display "Identified Notes" with custom style
+                        ui.label(
+                            egui::RichText::new("Identified Notes")
+                                .strong()
+                                .size(30.0) // Example font size, adjust as needed
+                        );
+                    });
 
-                    // Here, display the dynamically loaded notes.
+                    // Display the dynamically loaded notes
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         if let Ok(notes_output) = notes_output.lock() {
-                            ui.label(format!("{}", *notes_output));
+                            // Center the dynamically loaded notes
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!("{}", *notes_output))
+                                        .size(16.0)
+                                );
+                            });
                         }
                     });
 
-                    // Scrollable debugging area
+                    // Flexible space to push the debug area to the bottom
+                    ui.add_space(ui.available_height() / 1.1);
+
+                    // Scrollable debugging area, located beneath the notes display
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         if let Ok(debug_messages) = debug_messages.lock() {
-                            ui.label(&*debug_messages);
+                            ui.vertical_centered(|ui| {
+                                ui.label(&*debug_messages);
+                            });
                         }
-                    })
+                    });
                 });
             },
         )
@@ -272,32 +294,23 @@ impl Plugin for FourierChords {
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
 
-        // Copy samples from buffer to sample_vec
-        // self.counter = 0;
-        // for mut sample_frame in buffer.iter_samples() {
-        //     if let Some(&mut left_sample) = sample_frame.get_mut(0) {
-        //         self.sample_vec[self.counter % 1024] = left_sample;
-        //     }
-        //
-        //     self.counter = (self.counter + 1) % self.sample_vec.len();
-        // }
+        // Print buffer size to debug window
+        if !self.buffer_displayed {
+            {
+                let message = format!("Buffer size: {:?}", buffer.samples());
+                let mut debug_messages = self.params.debug_messages.lock().unwrap();
+                debug_messages.push_str(&message);
+            }
 
-        // // Apply the window function to the audio data (Hanning, etc.)
-        // apply_window_function(self);
-        //
-        // // Perform the FFT
-        // perform_fft(self);
-        //
-        // // Get the spectrum data
-        // get_spectrum_data(self);
-        //
-        //
-        // // Identify notes
-        // identify_notes(self);
+            self.buffer_displayed = true;
+        }
 
         for mut sample_frame in buffer.iter_samples() {
             if let Some(&mut left_sample) = sample_frame.get_mut(0) {
-                self.sample_vec.push(left_sample);
+                // Avoids adding noise
+                if left_sample.abs() > 0.001 {
+                    self.sample_vec.push(left_sample);
+                }
 
                 // Check if we've reached the desired sample count
                 if self.sample_vec.len() >= 264600 {
@@ -413,7 +426,7 @@ fn perform_fft(fourier_chords: &mut FourierChords) -> () {
 // Utility function to apply the window function in place
 fn apply_window_function(fourier_chords: &mut FourierChords) {
     for (i, (&sample, windowed_value)) in fourier_chords.sample_vec.iter().zip(fourier_chords.windowed_values.iter_mut()).enumerate() {
-        let window_value = 0.5 - 0.5 * (2.0 * PI * i as f32 / (1024f32 - 1.0)).cos();
+        let window_value = 0.5 - 0.5 * (2.0 * PI * i as f32 / (264600f32 - 1.0)).cos();
         *windowed_value = sample * window_value;
     }
 }
@@ -421,6 +434,9 @@ fn apply_window_function(fourier_chords: &mut FourierChords) {
 // Transforms buffer of complex numbers from FFT forward transform and returns vector of
 // SpectrumData, which contains fields for frequencies and magnitudes
 fn get_spectrum_data(fourier_chords: &mut FourierChords) -> () {
+    fourier_chords.nyquist_limit = fourier_chords.sample_vec.len() /2;
+    fourier_chords.frequency_resolution = fourier_chords.sample_rate / fourier_chords.sample_vec.len() as f32;
+
     for (i, spectrum_data) in fourier_chords.spectrum_data
         .iter_mut()
         .enumerate()
@@ -534,17 +550,4 @@ fn calculate_prominence(spectrum: &[SpectrumData], peak_index: usize) -> f32 {
 
     // Return prominence
     prominence
-}
-
-// Utility function to populate notes for display
-fn create_notes_string(fourier_chords: &mut FourierChords) {
-    for note in fourier_chords.detected_notes.iter() {
-        fourier_chords.notes_string_for_display.push_str(note);
-    }
-}
-
-// Function to convert float sample values to i16 values for FFT analysis
-fn convert_float_to_int16(float_sample: f32) -> i16 {
-    let clamped_sample = float_sample.max(-1.0).min(1.0);
-    (clamped_sample * 32767.0) as i16
 }
