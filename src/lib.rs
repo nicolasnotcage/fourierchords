@@ -96,7 +96,8 @@ impl Default for FourierChords {
 
         // Use planner to create FFT algorithm
         // Update value here if changing window size. Testing showed 65,536 to be a good balance
-        // between performance and algorithm accuracy.
+        // between performance and algorithm accuracy. Also need to change window_size if changing
+        // this value.
         let fft_algorithm = planner.plan_fft_forward(65536);
 
         Self {
@@ -105,7 +106,8 @@ impl Default for FourierChords {
             // Initialize sample rate to standard of 44.1khz. Will be updated in initialize function.
             sample_rate: 44100.0,
 
-            // Initialize de
+            // Select window size. Will need changed manually if desired. If changed, the fft_forward
+            // value must be changed too in the above fft_algorithm initialization.
             window_size: 65536,
 
             // Initialize note data hashmap
